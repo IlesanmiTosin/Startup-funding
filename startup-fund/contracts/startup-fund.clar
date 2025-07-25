@@ -214,3 +214,96 @@
         )
     )
 )
+
+(define-public (invest-in-campaign
+        (campaign-id uint)
+        (amount uint)
+    )
+    (let (
+            (campaign (unwrap! (map-get? campaigns campaign-id) err-campaign-not-found))
+            (existing-investment (default-to {
+                amount: u0,
+                timestamp: u0,
+                equity-tokens: u0,
+            }
+                (map-get? campaign-investments {
+                    campaign-id: campaign-id,
+                    investor: tx-sender,
+                })
+            ))
+            (platform-fee (calculate-platform-fee amount))
+            (investment-amount (- amount platform-fee))
+            (equity-tokens (calculate-equity-tokens investment-amount
+                (get funding-goal campaign)
+            ))
+            (current-stats (unwrap! (map-get? campaign-stats campaign-id) err-campaign-not-found))
+        )
+        (begin
+            (asserts! (not (var-get paused)) err-invalid-parameter)
+            (asserts! (get active campaign) err-campaign-ended)
+            (asserts! (<= stacks-block-height (get deadline campaign))
+                err-campaign-ended
+            )
+            (asserts! (> amount u0) err-invalid-parameter)
+            (asserts! (>= (stx-get-balance tx-sender) amount)
+                err-insufficient-funds
+            )
+            ;; Transfer investment to founder
+            (unwrap!
+                (stx-transfer? investment-amount tx-sender (get founder campaign))
+                err-insufficient-funds
+            )
+            ;; Transfer platform fee
+            (unwrap! (stx-transfer? platform-fee tx-sender contract-owner)
+                err-insufficient-funds
+            )
+            ;; Update campaign data
+            (map-set campaigns campaign-id
+                (merge campaign { total-raised: (+ (get total-raised campaign) investment-amount) })
+            )
+            ;; Update investment record
+            (map-set campaign-investments {
+                campaign-id: campaign-id,
+                investor: tx-sender,
+            } {
+                amount: (+ (get amount existing-investment) investment-amount),
+                timestamp: stacks-block-height,
+                equity-tokens: (+ (get equity-tokens existing-investment) equity-tokens),
+            })
+            ;; Update investor portfolio
+            (let ((portfolio (default-to {
+                    total-invested: u0,
+                    active-campaigns: u0,
+                    total-returns: u0,
+                }
+                    (map-get? investor-portfolios tx-sender)
+                )))
+                (map-set investor-portfolios tx-sender
+                    (merge portfolio {
+                        total-invested: (+ (get total-invested portfolio) investment-amount),
+                        active-campaigns: (if (is-eq (get amount existing-investment) u0)
+                            (+ (get active-campaigns portfolio) u1)
+                            (get active-campaigns portfolio)
+                        ),
+                    })
+                )
+            )
+            ;; Update campaign statistics
+            (let ((new-investor-count (if (is-eq (get amount existing-investment) u0)
+                    (+ (get total-investors current-stats) u1)
+                    (get total-investors current-stats)
+                )))
+                (map-set campaign-stats campaign-id {
+                    total-investors: new-investor-count,
+                    average-investment: (/ (get total-raised campaign) new-investor-count),
+                    last-update: stacks-block-height,
+                })
+            )
+            ;; Update platform fees
+            (var-set total-platform-fees
+                (+ (var-get total-platform-fees) platform-fee)
+            )
+            (ok true)
+        )
+    )
+)
