@@ -67,3 +67,79 @@
         last-update: uint,
     }
 )
+
+;; Read-only functions
+(define-read-only (get-campaign-details (campaign-id uint))
+    (map-get? campaigns campaign-id)
+)
+
+(define-read-only (get-investment-details
+        (campaign-id uint)
+        (investor principal)
+    )
+    (map-get? campaign-investments {
+        campaign-id: campaign-id,
+        investor: investor,
+    })
+)
+
+(define-read-only (get-investor-portfolio (investor principal))
+    (map-get? investor-portfolios investor)
+)
+
+(define-read-only (get-campaign-stats (campaign-id uint))
+    (map-get? campaign-stats campaign-id)
+)
+
+(define-read-only (get-total-campaigns)
+    (var-get total-campaigns)
+)
+
+(define-read-only (get-platform-fee-percentage)
+    (var-get platform-fee-percentage)
+)
+
+(define-read-only (is-contract-paused)
+    (var-get paused)
+)
+
+;; Private functions
+(define-private (calculate-platform-fee (amount uint))
+    (/ (* amount (var-get platform-fee-percentage)) u10000)
+)
+
+(define-private (calculate-equity-tokens
+        (investment uint)
+        (funding-goal uint)
+    )
+    ;; Simple equity calculation: (investment / funding-goal) * 10000 tokens
+    (/ (* investment u10000) funding-goal)
+)
+
+;; Administrative functions
+(define-public (set-platform-fee (new-fee uint))
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (asserts! (<= new-fee u1000) err-invalid-parameter) ;; Max 10%
+        (var-set platform-fee-percentage new-fee)
+        (ok true)
+    )
+)
+
+(define-public (toggle-pause)
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (var-set paused (not (var-get paused)))
+        (ok true)
+    )
+)
+
+(define-public (withdraw-platform-fees)
+    (begin
+        (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+        (let ((fees (var-get total-platform-fees)))
+            (var-set total-platform-fees u0)
+            (stx-transfer? fees tx-sender contract-owner)
+        )
+    )
+)
