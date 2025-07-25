@@ -143,3 +143,74 @@
         )
     )
 )
+
+;; Campaign creation and management
+(define-public (create-campaign
+        (title (string-utf8 64))
+        (description (string-utf8 256))
+        (funding-goal uint)
+        (duration uint)
+        (milestone-count uint)
+    )
+    (let ((campaign-id (+ (var-get total-campaigns) u1)))
+        (begin
+            (asserts! (not (var-get paused)) err-invalid-parameter)
+            (asserts! (> funding-goal u0) err-invalid-parameter)
+            (asserts! (> duration u0) err-invalid-parameter)
+            (asserts! (and (>= milestone-count u1) (<= milestone-count u10))
+                err-invalid-parameter
+            )
+            (map-set campaigns campaign-id {
+                founder: tx-sender,
+                title: title,
+                description: description,
+                funding-goal: funding-goal,
+                total-raised: u0,
+                deadline: (+ stacks-block-height duration),
+                active: true,
+                completed: false,
+                milestone-count: milestone-count,
+            })
+            (map-set campaign-stats campaign-id {
+                total-investors: u0,
+                average-investment: u0,
+                last-update: stacks-block-height,
+            })
+            (var-set total-campaigns campaign-id)
+            (ok campaign-id)
+        )
+    )
+)
+
+(define-public (close-campaign (campaign-id uint))
+    (let ((campaign (unwrap! (map-get? campaigns campaign-id) err-campaign-not-found)))
+        (begin
+            (asserts! (is-eq tx-sender (get founder campaign)) err-not-authorized)
+            (asserts! (get active campaign) err-campaign-ended)
+            (asserts!
+                (or
+                    (> stacks-block-height (get deadline campaign))
+                    (>= (get total-raised campaign) (get funding-goal campaign))
+                )
+                err-invalid-parameter
+            )
+            (map-set campaigns campaign-id
+                (merge campaign {
+                    active: false,
+                    completed: true,
+                })
+            )
+            (ok true)
+        )
+    )
+)
+
+(define-public (emergency-close-campaign (campaign-id uint))
+    (let ((campaign (unwrap! (map-get? campaigns campaign-id) err-campaign-not-found)))
+        (begin
+            (asserts! (is-eq tx-sender contract-owner) err-owner-only)
+            (map-set campaigns campaign-id (merge campaign { active: false }))
+            (ok true)
+        )
+    )
+)
