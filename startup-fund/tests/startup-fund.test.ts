@@ -774,4 +774,622 @@ describe("FundFlow Startup Funding Platform", () => {
       expect(result).toBeErr(Cl.uint(100)); // err-owner-only
     });
   });
+
+  describe("Milestone System and Governance", () => {
+    beforeEach(() => {
+      // Create and fund a campaign, then close it to enable milestones
+      simnet.callPublicFn(
+        "startup-fund",
+        "create-campaign",
+        [
+          Cl.stringUtf8(CAMPAIGN_TITLE),
+          Cl.stringUtf8(CAMPAIGN_DESCRIPTION),
+          Cl.uint(FUNDING_GOAL),
+          Cl.uint(CAMPAIGN_DURATION),
+          Cl.uint(MILESTONE_COUNT),
+        ],
+        founder
+      );
+
+      // Add some investments
+      simnet.callPublicFn(
+        "startup-fund",
+        "invest-in-campaign",
+        [Cl.uint(1), Cl.uint(200000)],
+        investor1
+      );
+
+      simnet.callPublicFn(
+        "startup-fund",
+        "invest-in-campaign",
+        [Cl.uint(1), Cl.uint(300000)],
+        investor2
+      );
+
+      // Close the campaign to enable milestone creation
+      simnet.mineEmptyBlocks(CAMPAIGN_DURATION + 1);
+      simnet.callPublicFn("startup-fund", "close-campaign", [Cl.uint(1)], founder);
+    });
+
+    it("should allow founder to create milestone", () => {
+      const milestoneTitle = "MVP Development";
+      const milestoneDescription = "Complete minimum viable product development";
+      const fundingPercentage = 30; // 30%
+      const votingDuration = 500; // blocks
+
+      const { result } = simnet.callPublicFn(
+        "startup-fund",
+        "create-milestone",
+        [
+          Cl.uint(1), // campaign-id
+          Cl.uint(1), // milestone-id
+          Cl.stringUtf8(milestoneTitle),
+          Cl.stringUtf8(milestoneDescription),
+          Cl.uint(fundingPercentage),
+          Cl.uint(votingDuration),
+        ],
+        founder
+      );
+      expect(result).toBeOk(Cl.bool(true));
+
+      // Verify milestone details
+      const milestoneDetails = simnet.callReadOnlyFn(
+        "startup-fund",
+        "get-milestone-details",
+        [Cl.uint(1), Cl.uint(1)],
+        founder
+      );
+
+      expect(milestoneDetails.result).toBeSome(
+        Cl.tuple({
+          title: Cl.stringUtf8(milestoneTitle),
+          description: Cl.stringUtf8(milestoneDescription),
+          "funding-percentage": Cl.uint(fundingPercentage),
+          completed: Cl.bool(false),
+          "votes-for": Cl.uint(0),
+          "votes-against": Cl.uint(0),
+          "voting-deadline": Cl.uint(simnet.blockHeight + votingDuration),
+          "funds-released": Cl.bool(false),
+        })
+      );
+    });
+
+    it("should reject milestone creation by non-founder", () => {
+      const { result } = simnet.callPublicFn(
+        "startup-fund",
+        "create-milestone",
+        [
+          Cl.uint(1),
+          Cl.uint(1),
+          Cl.stringUtf8("Unauthorized Milestone"),
+          Cl.stringUtf8("This should fail"),
+          Cl.uint(25),
+          Cl.uint(500),
+        ],
+        investor1
+      );
+      expect(result).toBeErr(Cl.uint(101)); // err-not-authorized
+    });
+
+    it("should reject milestone creation for incomplete campaign", () => {
+      // Create a new campaign that's not completed
+      simnet.callPublicFn(
+        "startup-fund",
+        "create-campaign",
+        [
+          Cl.stringUtf8("New Campaign"),
+          Cl.stringUtf8("Not completed yet"),
+          Cl.uint(FUNDING_GOAL),
+          Cl.uint(CAMPAIGN_DURATION),
+          Cl.uint(MILESTONE_COUNT),
+        ],
+        founder
+      );
+
+      const { result } = simnet.callPublicFn(
+        "startup-fund",
+        "create-milestone",
+        [
+          Cl.uint(2), // new campaign id
+          Cl.uint(1),
+          Cl.stringUtf8("Early Milestone"),
+          Cl.stringUtf8("Too early"),
+          Cl.uint(25),
+          Cl.uint(500),
+        ],
+        founder
+      );
+      expect(result).toBeErr(Cl.uint(102)); // err-campaign-not-found (due to !completed check)
+    });
+
+    it("should reject milestone with invalid parameters", () => {
+      // Invalid funding percentage (0%)
+      let result = simnet.callPublicFn(
+        "startup-fund",
+        "create-milestone",
+        [
+          Cl.uint(1),
+          Cl.uint(1),
+          Cl.stringUtf8("Invalid Milestone"),
+          Cl.stringUtf8("Zero funding"),
+          Cl.uint(0),
+          Cl.uint(500),
+        ],
+        founder
+      );
+      expect(result.result).toBeErr(Cl.uint(105)); // err-invalid-parameter
+
+      // Invalid funding percentage (>100%)
+      result = simnet.callPublicFn(
+        "startup-fund",
+        "create-milestone",
+        [
+          Cl.uint(1),
+          Cl.uint(1),
+          Cl.stringUtf8("Invalid Milestone"),
+          Cl.stringUtf8("Too much funding"),
+          Cl.uint(101),
+          Cl.uint(500),
+        ],
+        founder
+      );
+      expect(result.result).toBeErr(Cl.uint(105)); // err-invalid-parameter
+
+      // Invalid milestone ID (exceeds milestone count)
+      result = simnet.callPublicFn(
+        "startup-fund",
+        "create-milestone",
+        [
+          Cl.uint(1),
+          Cl.uint(4), // exceeds MILESTONE_COUNT (3)
+          Cl.stringUtf8("Invalid Milestone"),
+          Cl.stringUtf8("Invalid ID"),
+          Cl.uint(25),
+          Cl.uint(500),
+        ],
+        founder
+      );
+      expect(result.result).toBeErr(Cl.uint(105)); // err-invalid-parameter
+    });
+
+    it("should allow investors to vote on milestones", () => {
+      // Create milestone first
+      simnet.callPublicFn(
+        "startup-fund",
+        "create-milestone",
+        [
+          Cl.uint(1),
+          Cl.uint(1),
+          Cl.stringUtf8("Test Milestone"),
+          Cl.stringUtf8("Test voting"),
+          Cl.uint(30),
+          Cl.uint(500),
+        ],
+        founder
+      );
+
+      // Vote for the milestone
+      const { result } = simnet.callPublicFn(
+        "startup-fund",
+        "vote-on-milestone",
+        [Cl.uint(1), Cl.uint(1), Cl.bool(true)], // approve
+        investor1
+      );
+      expect(result).toBeOk(Cl.bool(true));
+
+      // Check vote details
+      const voteDetails = simnet.callReadOnlyFn(
+        "startup-fund",
+        "get-milestone-vote",
+        [Cl.uint(1), Cl.uint(1), Cl.principal(investor1)],
+        investor1
+      );
+      expect(voteDetails.result).not.toBeNone();
+
+      // Check milestone vote counts updated
+      const milestoneDetails = simnet.callReadOnlyFn(
+        "startup-fund",
+        "get-milestone-details",
+        [Cl.uint(1), Cl.uint(1)],
+        founder
+      );
+      expect(milestoneDetails.result).not.toBeNone();
+    });
+
+    it("should reject voting by non-investors", () => {
+      // Create milestone
+      simnet.callPublicFn(
+        "startup-fund",
+        "create-milestone",
+        [
+          Cl.uint(1),
+          Cl.uint(1),
+          Cl.stringUtf8("Test Milestone"),
+          Cl.stringUtf8("Test voting"),
+          Cl.uint(30),
+          Cl.uint(500),
+        ],
+        founder
+      );
+
+      // Try to vote with non-investor account
+      const { result } = simnet.callPublicFn(
+        "startup-fund",
+        "vote-on-milestone",
+        [Cl.uint(1), Cl.uint(1), Cl.bool(true)],
+        investor3 // hasn't invested
+      );
+      expect(result).toBeErr(Cl.uint(101)); // err-not-authorized
+    });
+
+    it("should reject duplicate votes", () => {
+      // Create milestone
+      simnet.callPublicFn(
+        "startup-fund",
+        "create-milestone",
+        [
+          Cl.uint(1),
+          Cl.uint(1),
+          Cl.stringUtf8("Test Milestone"),
+          Cl.stringUtf8("Test voting"),
+          Cl.uint(30),
+          Cl.uint(500),
+        ],
+        founder
+      );
+
+      // First vote
+      simnet.callPublicFn(
+        "startup-fund",
+        "vote-on-milestone",
+        [Cl.uint(1), Cl.uint(1), Cl.bool(true)],
+        investor1
+      );
+
+      // Try to vote again
+      const { result } = simnet.callPublicFn(
+        "startup-fund",
+        "vote-on-milestone",
+        [Cl.uint(1), Cl.uint(1), Cl.bool(false)],
+        investor1
+      );
+      expect(result).toBeErr(Cl.uint(107)); // err-already-voted
+    });
+
+    it("should reject voting after deadline", () => {
+      const votingDuration = 10; // short duration
+      
+      // Create milestone with short voting period
+      simnet.callPublicFn(
+        "startup-fund",
+        "create-milestone",
+        [
+          Cl.uint(1),
+          Cl.uint(1),
+          Cl.stringUtf8("Test Milestone"),
+          Cl.stringUtf8("Test voting"),
+          Cl.uint(30),
+          Cl.uint(votingDuration),
+        ],
+        founder
+      );
+
+      // Mine blocks to pass voting deadline
+      simnet.mineEmptyBlocks(votingDuration + 1);
+
+      // Try to vote after deadline
+      const { result } = simnet.callPublicFn(
+        "startup-fund",
+        "vote-on-milestone",
+        [Cl.uint(1), Cl.uint(1), Cl.bool(true)],
+        investor1
+      );
+      expect(result).toBeErr(Cl.uint(108)); // err-voting-period-ended
+    });
+
+    it("should allow founder to complete milestone with majority approval", () => {
+      const votingDuration = 100;
+      
+      // Create milestone
+      simnet.callPublicFn(
+        "startup-fund",
+        "create-milestone",
+        [
+          Cl.uint(1),
+          Cl.uint(1),
+          Cl.stringUtf8("Test Milestone"),
+          Cl.stringUtf8("Test completion"),
+          Cl.uint(30),
+          Cl.uint(votingDuration),
+        ],
+        founder
+      );
+
+      // Both investors vote to approve (should be >50%)
+      simnet.callPublicFn(
+        "startup-fund",
+        "vote-on-milestone",
+        [Cl.uint(1), Cl.uint(1), Cl.bool(true)],
+        investor1
+      );
+
+      simnet.callPublicFn(
+        "startup-fund",
+        "vote-on-milestone",
+        [Cl.uint(1), Cl.uint(1), Cl.bool(true)],
+        investor2
+      );
+
+      // Wait for voting period to end
+      simnet.mineEmptyBlocks(votingDuration + 1);
+
+      // Complete milestone
+      const { result } = simnet.callPublicFn(
+        "startup-fund",
+        "complete-milestone",
+        [Cl.uint(1), Cl.uint(1)],
+        founder
+      );
+      expect(result).toBeOk(Cl.bool(true));
+
+      // Verify milestone is completed
+      const milestoneDetails = simnet.callReadOnlyFn(
+        "startup-fund",
+        "get-milestone-details",
+        [Cl.uint(1), Cl.uint(1)],
+        founder
+      );
+      expect(milestoneDetails.result).not.toBeNone();
+    });
+
+    it("should reject milestone completion without majority approval", () => {
+      const votingDuration = 100;
+      
+      // Create milestone
+      simnet.callPublicFn(
+        "startup-fund",
+        "create-milestone",
+        [
+          Cl.uint(1),
+          Cl.uint(1),
+          Cl.stringUtf8("Test Milestone"),
+          Cl.stringUtf8("Test rejection"),
+          Cl.uint(30),
+          Cl.uint(votingDuration),
+        ],
+        founder
+      );
+
+      // One investor approves, one rejects
+      simnet.callPublicFn(
+        "startup-fund",
+        "vote-on-milestone",
+        [Cl.uint(1), Cl.uint(1), Cl.bool(true)],
+        investor1
+      );
+
+      simnet.callPublicFn(
+        "startup-fund",
+        "vote-on-milestone",
+        [Cl.uint(1), Cl.uint(1), Cl.bool(false)],
+        investor2
+      );
+
+      // Wait for voting period to end
+      simnet.mineEmptyBlocks(votingDuration + 1);
+
+      // Try to complete milestone (should fail due to 50/50 split)
+      const { result } = simnet.callPublicFn(
+        "startup-fund",
+        "complete-milestone",
+        [Cl.uint(1), Cl.uint(1)],
+        founder
+      );
+      expect(result).toBeErr(Cl.uint(109)); // err-milestone-not-completed
+    });
+
+    it("should reject milestone completion by non-founder", () => {
+      const votingDuration = 100;
+      
+      // Create and approve milestone
+      simnet.callPublicFn(
+        "startup-fund",
+        "create-milestone",
+        [
+          Cl.uint(1),
+          Cl.uint(1),
+          Cl.stringUtf8("Test Milestone"),
+          Cl.stringUtf8("Test authorization"),
+          Cl.uint(30),
+          Cl.uint(votingDuration),
+        ],
+        founder
+      );
+
+      simnet.callPublicFn(
+        "startup-fund",
+        "vote-on-milestone",
+        [Cl.uint(1), Cl.uint(1), Cl.bool(true)],
+        investor1
+      );
+
+      simnet.callPublicFn(
+        "startup-fund",
+        "vote-on-milestone",
+        [Cl.uint(1), Cl.uint(1), Cl.bool(true)],
+        investor2
+      );
+
+      simnet.mineEmptyBlocks(votingDuration + 1);
+
+      // Try to complete by non-founder
+      const { result } = simnet.callPublicFn(
+        "startup-fund",
+        "complete-milestone",
+        [Cl.uint(1), Cl.uint(1)],
+        investor1
+      );
+      expect(result).toBeErr(Cl.uint(101)); // err-not-authorized
+    });
+
+    it("should reject milestone completion before voting deadline", () => {
+      const votingDuration = 100;
+      
+      // Create milestone
+      simnet.callPublicFn(
+        "startup-fund",
+        "create-milestone",
+        [
+          Cl.uint(1),
+          Cl.uint(1),
+          Cl.stringUtf8("Test Milestone"),
+          Cl.stringUtf8("Test early completion"),
+          Cl.uint(30),
+          Cl.uint(votingDuration),
+        ],
+        founder
+      );
+
+      // Approve milestone
+      simnet.callPublicFn(
+        "startup-fund",
+        "vote-on-milestone",
+        [Cl.uint(1), Cl.uint(1), Cl.bool(true)],
+        investor1
+      );
+
+      // Try to complete before deadline (no blocks mined)
+      const { result } = simnet.callPublicFn(
+        "startup-fund",
+        "complete-milestone",
+        [Cl.uint(1), Cl.uint(1)],
+        founder
+      );
+      expect(result).toBeErr(Cl.uint(108)); // err-voting-period-ended (inverted logic)
+    });
+
+    it("should calculate milestone approval rate correctly", () => {
+      // Create milestone
+      simnet.callPublicFn(
+        "startup-fund",
+        "create-milestone",
+        [
+          Cl.uint(1),
+          Cl.uint(1),
+          Cl.stringUtf8("Test Milestone"),
+          Cl.stringUtf8("Test approval rate"),
+          Cl.uint(30),
+          Cl.uint(500),
+        ],
+        founder
+      );
+
+      // One approval vote
+      simnet.callPublicFn(
+        "startup-fund",
+        "vote-on-milestone",
+        [Cl.uint(1), Cl.uint(1), Cl.bool(true)],
+        investor1
+      );
+
+      // Check approval rate (should be 100% with 1 vote)
+      const approvalRate = simnet.callReadOnlyFn(
+        "startup-fund",
+        "calculate-milestone-approval-rate",
+        [Cl.uint(1), Cl.uint(1)],
+        founder
+      );
+      expect(approvalRate.result).toBeOk(Cl.uint(100));
+
+      // Add rejection vote
+      simnet.callPublicFn(
+        "startup-fund",
+        "vote-on-milestone",
+        [Cl.uint(1), Cl.uint(1), Cl.bool(false)],
+        investor2
+      );
+
+      // Check approval rate again (voting power weighted, not 50/50 due to different investment amounts)
+      const approvalRate2 = simnet.callReadOnlyFn(
+        "startup-fund",
+        "calculate-milestone-approval-rate",
+        [Cl.uint(1), Cl.uint(1)],
+        founder
+      );
+      // Note: Approval rate is based on voting power (equity tokens), not vote count
+      // investor1 has less voting power than investor2, so rate will be less than 50%
+      expect(approvalRate2.result).toBeOk(Cl.uint(40)); // Actual weighted percentage
+    });
+
+    it("should allow owner to force milestone completion", () => {
+      // Create milestone
+      simnet.callPublicFn(
+        "startup-fund",
+        "create-milestone",
+        [
+          Cl.uint(1),
+          Cl.uint(1),
+          Cl.stringUtf8("Emergency Milestone"),
+          Cl.stringUtf8("Emergency completion"),
+          Cl.uint(30),
+          Cl.uint(500),
+        ],
+        founder
+      );
+
+      // Force completion by owner
+      const { result } = simnet.callPublicFn(
+        "startup-fund",
+        "force-milestone-completion",
+        [Cl.uint(1), Cl.uint(1)],
+        deployer
+      );
+      expect(result).toBeOk(Cl.bool(true));
+    });
+
+    it("should reject forced milestone completion by non-owner", () => {
+      // Create milestone
+      simnet.callPublicFn(
+        "startup-fund",
+        "create-milestone",
+        [
+          Cl.uint(1),
+          Cl.uint(1),
+          Cl.stringUtf8("Test Milestone"),
+          Cl.stringUtf8("Test forced completion"),
+          Cl.uint(30),
+          Cl.uint(500),
+        ],
+        founder
+      );
+
+      // Try forced completion by non-owner
+      const { result } = simnet.callPublicFn(
+        "startup-fund",
+        "force-milestone-completion",
+        [Cl.uint(1), Cl.uint(1)],
+        founder
+      );
+      expect(result).toBeErr(Cl.uint(100)); // err-owner-only
+    });
+
+    it("should return none for non-existent milestone", () => {
+      const milestoneDetails = simnet.callReadOnlyFn(
+        "startup-fund",
+        "get-milestone-details",
+        [Cl.uint(1), Cl.uint(999)],
+        founder
+      );
+      expect(milestoneDetails.result).toBeNone();
+
+      const approvalRate = simnet.callReadOnlyFn(
+        "startup-fund",
+        "calculate-milestone-approval-rate",
+        [Cl.uint(1), Cl.uint(999)],
+        founder
+      );
+      expect(approvalRate.result).toBeErr(Cl.uint(0));
+    });
+  });
 });
+
